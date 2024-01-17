@@ -1,0 +1,175 @@
+var SS = SpreadsheetApp.getActiveSpreadsheet();
+var SHEET = SS.getSheetByName('WBS');
+var HOLIDAY_SHEET = SS.getSheetByName('holiday');
+var PJT_DUE = SHEET.getRange("H1:I1").getValues()[0]; //PJTの設定期間を取得
+var PJT_START = PJT_DUE[0]; //PJTの開始日
+var PJT_END = PJT_DUE[1];//PJTの終了日
+var DATE_START_COL = 12; // 日付セルの開始列の位置
+var WEEKS = ["日","月","火","水","木","金","土"]; //曜日データの値変換用配列（0 = 日曜日）
+
+//シンプルトリガー（シートを開いたら実行）
+function onOpen() {
+  var UI = SpreadsheetApp.getUi(); // Uiクラスを取得する
+  var MENU = UI.createMenu('ガントチャート'); // Uiクラスからメニューを作成する
+  MENU.addItem('PJT期間反映','WBS'); // メニューにアイテムを追加する
+  MENU.addItem('祝日アップデート','HOLIDAY'); // メニューにアイテムを追加する
+  MENU.addToUi(); // メニューをUiクラスに追加する
+}
+
+function WBS() {
+  //すでに日付列がある場合は列を削除
+  var DELETE_COL = SHEET.getLastColumn() - DATE_START_COL;
+  var LAST_ROW = SHEET.getLastRow();
+  if(DELETE_COL > 1) {
+    SHEET.deleteColumns(DATE_START_COL,DELETE_COL);
+  }
+  SHEET.getRange(1,DATE_START_COL,LAST_ROW,1).clearContent();
+
+  //日付の列を追加
+  var PJT_DAYS_NUM = (PJT_END - PJT_START) / 86400000;
+  SHEET.insertColumnsAfter(DATE_START_COL,PJT_DAYS_NUM);
+  var LAST_COL = SHEET.getLastColumn();
+
+  //PJT期間の月日データ準備
+  var DATE_VALUES = [];//PJT期間の年月日を入れる配列
+  var MONTH_VALUES = []; //月だけを入れる配列
+  var DAY_VALUES = []; //日だけを入れる配列
+  var WEEK_VALUES = []; //曜日を入れる配列
+  var SET_VALUES = [MONTH_VALUES,DAY_VALUES,WEEK_VALUES];
+  for(var i=0; i<=PJT_DAYS_NUM; i++) {
+    DATE_VALUES[i] = new Date(PJT_START.getFullYear(), PJT_START.getMonth(),PJT_START.getDate() + i);
+    MONTH_VALUES[i] = Utilities.formatDate((DATE_VALUES[i]), "JST","M");
+    DAY_VALUES[i] = Utilities.formatDate((DATE_VALUES[i]), "JST","d");
+    WEEK_VALUES[i] = WEEKS[DATE_VALUES[i].getDay()];
+  }
+
+　//WEEK_VALUE内に祝日を反映
+  var API_HOLIDAY = HOLIDAY_SHEET.getRange('A:A').getValues();
+  var API_HOLIDAY_LEN = API_HOLIDAY.filter(String).length;
+  var HOLIDAY = [];
+  var COM_START = PJT_START.getTime();
+  var COM_END = PJT_END.getTime()
+  for(var i=0; i<API_HOLIDAY_LEN; i++) {
+    if(API_HOLIDAY[i][0].getTime() >= COM_START && API_HOLIDAY[i][0].getTime() <= COM_END) {
+      HOLIDAY.push(API_HOLIDAY[i][0]);
+    }
+  }
+  for(var i=0; i<HOLIDAY.length; i++) {
+    WEEK_CHANGE_NUM = (HOLIDAY[i] - PJT_START) / 86400000;
+    WEEK_VALUES.splice(WEEK_CHANGE_NUM,1,"休");
+  }
+
+  //シートに日付データ一括反映
+  SHEET.getRange(1,DATE_START_COL,3,PJT_DAYS_NUM+1).setValues(SET_VALUES);
+
+  //重複月のセルを結合
+  var MERGE_COL_NUM = 1;
+  var MERGE_START_COL = DATE_START_COL;
+  for(var i=0; i<=PJT_DAYS_NUM; i++) {
+    var MONTH = MONTH_VALUES[i];
+    var NEXT_MONTH = MONTH_VALUES[i+1];
+    if( MONTH === NEXT_MONTH) {
+      MERGE_COL_NUM++;
+    }
+    else {
+      SHEET.getRange(1,MERGE_START_COL,1,MERGE_COL_NUM).merge();
+      MERGE_START_COL = MERGE_START_COL + MERGE_COL_NUM;
+      MERGE_COL_NUM=1;
+    }
+  }
+
+  //日付入力規則をカレンダーにする
+  var RULE = SpreadsheetApp.newDataValidation().requireDateBetween(new Date(PJT_START), new Date(PJT_END)).build();
+  SHEET.getRange(4,8,LAST_ROW,2).setDataValidation(RULE);
+
+  //すでに入力のある場合のタスクの期間を反映
+  var TASK_START_LAST_ROW = SHEET.getRange(SHEET.getMaxRows(), 8).getNextDataCell(SpreadsheetApp.Direction.UP).getRow();
+  if(TASK_START_LAST_ROW>3) {
+     for(i=TASK_START_LAST_ROW; i>3; i--) {
+       var TASK_START = SHEET.getRange(i,8,1,1);
+       var TASK_START_DATE = TASK_START.getValue();
+       var TASK_END_DATE = TASK_START.offset(0,1).getValue();
+       var TASK_START_RULE = (TASK_START_DATE - PJT_START) / 86400000;
+       var TASK_END_RULE = (TASK_END_DATE - PJT_END) / 86400000;
+       var TASK_START_POS = TASK_START_RULE + 3;
+       if(TASK_START_RULE >= 0 && TASK_END_RULE <= 0) {
+         var TASK_DUE = (TASK_END_DATE - TASK_START_DATE) / 86400000 + 1;
+         try {
+           TASK_START.offset(0,TASK_START_POS,1,TASK_DUE).setValue("■");
+         } catch(e){}
+       }
+     }
+  }
+}
+
+//タスクの日付入力・編集時の処理
+//getRange(行番号, 列番号, 行数, 列数)
+function onEdit(e) {
+  var EDIT_ROW_START = e.range.rowStart;
+  var EDIT_ROW_END = e.range.rowEnd;
+  var EDIT_COL_START = e.range.columnStart;
+  var EDIT_COL_END = e.range.columnEnd;
+  if(EDIT_ROW_START>3 && EDIT_COL_START===8 && EDIT_COL_END===8) {
+    var LAST_COL = SHEET.getLastColumn();
+    for(var i=EDIT_ROW_START; i <= EDIT_ROW_END; i++){
+      var EDIT_CELL = SHEET.getRange(i,8,1,1);
+      var TASK_START_DATE = EDIT_CELL.getValue();
+      var TASK_END_DATE = EDIT_CELL.offset(0,1).getValue();
+      var TASK_START_RULE = (TASK_START_DATE - PJT_START) / 86400000;
+      var TASK_END_RULE = (TASK_END_DATE - PJT_END) / 86400000;
+      var TASK_START_POS = TASK_START_RULE + 4;
+      if(TASK_START_RULE >= 0 && TASK_END_RULE <= 0) {
+        SHEET.getRange(i,DATE_START_COL,1,LAST_COL-DATE_START_COL+1).clearContent();//編集時に全削除
+        var TASK_DUE = (TASK_END_DATE - TASK_START_DATE) / 86400000 + 1;
+        try {
+          EDIT_CELL.offset(0,TASK_START_POS,1,TASK_DUE).setValue("■");
+        } catch(e){}
+      } else {
+        SHEET.getRange(i,DATE_START_COL,1,LAST_COL-DATE_START_COL+1).clearContent();
+      }
+    }
+  }
+  if(EDIT_ROW_START>3 && EDIT_COL_START>=8 && EDIT_COL_END<=9) {
+    var LAST_COL = SHEET.getLastColumn();
+    for(var i=EDIT_ROW_START; i <= EDIT_ROW_END; i++){
+      var EDIT_CELL = SHEET.getRange(i,9,1,1);
+      var TASK_START_DATE = EDIT_CELL.offset(0,-1).getValue();
+      var TASK_END_DATE = EDIT_CELL.getValue();
+      var TASK_START_RULE = (TASK_START_DATE - PJT_START) / 86400000;
+      var TASK_END_RULE = (TASK_END_DATE - PJT_END) / 86400000;
+      var TASK_START_POS = TASK_START_RULE + 4;
+      if(TASK_START_RULE >= 0 && TASK_END_RULE <= 0) {
+        SHEET.getRange(i,DATE_START_COL,1,LAST_COL-DATE_START_COL+1).clearContent();//編集時に全削除
+        var TASK_DUE = (TASK_END_DATE - TASK_START_DATE) / 86400000 + 1;
+        try {
+          EDIT_CELL.offset(0,TASK_START_POS-1,1,TASK_DUE).setValue("■");
+        } catch(e){}
+      } else {
+        SHEET.getRange(i,DATE_START_COL,1,LAST_COL-DATE_START_COL+1).clearContent();
+      }
+    }
+  }
+}
+
+//祝日の日付をAPIから取得
+function HOLIDAY() {
+  var holiday_json_url = "https://holidays-jp.github.io/api/v1/date.json";　//(MITライセンス)by matsuoshi, monaural.net https://github.com/holidays-jp
+  var holiday_json = UrlFetchApp.fetch(holiday_json_url).getContentText();
+  var holiday_jsonData = JSON.parse(holiday_json);
+  var holiday_lst_row = HOLIDAY_SHEET.getLastRow();
+  if (holiday_lst_row===0) {
+    holiday_lst_row = 1;
+  }
+  var holidayDate = [];
+  var holidayLen = Object.keys(holiday_jsonData).length;
+  var holidayKeys = Object.keys(holiday_jsonData);
+  var holidayValues = Object.values(holiday_jsonData);
+  for(var i=0; i<holidayLen; i++){
+    holidayDate[i]=[];
+    holidayDate[i][0] = holidayKeys[i]
+    holidayDate[i][1] = holidayValues[i]
+  }
+
+  HOLIDAY_SHEET.getRange(1,1,holiday_lst_row,2).clearContent();//全削除
+  HOLIDAY_SHEET.getRange(1,1,holidayLen,2).setValues(holidayDate);//取得した祝日をシートに反映
+}
